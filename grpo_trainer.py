@@ -4,13 +4,30 @@ import base64
 from datetime import datetime
 from transformers import AutoProcessor, GenerationConfig, Trainer, AutoModelForImageTextToText
 from PIL import Image
-from torch.utils.data import Sampler
+from torch.utils.data import Sampler 
 from accelerate.utils import set_seed
 import wandb
 import json
 from tqdm import tqdm
 
 class RepeatRandomSampler(Sampler):
+    """
+    PyTorch의 Sampler를 상속받은 커스텀 샘플러(데이터셋에서 어떤 순서로 데이터를 뽑아올지)
+    - mini_repeat_count: 하나의 index를 batch 안에서 몇 번 반복할지
+    - batch_size: 한 배치당 몇 개의 고유한 index를 뽑을지 (중복을 세지 않고)
+    - repeat_count: 전체 샘플링 과정을 몇 번 반복할지
+    - seed: 랜덤 시드를 고정해서 항상 같은 결과가 나오게 할지
+    
+    1. batch_size만큼의 "고유 index"를 랜덤하게 뽑고
+       batch_size=3이면, [4, 3, 0] 같이 3개의 index를 랜덤하게 뽑음
+    2. 뽑힌 index들을 mini_repeat_count만큼 반복
+       mini_repeat_count=2면, [4, 4, 3, 3, 0, 0] 이런 식으로 같은 index를 2번씩 반복
+    3. 위 과정을 repeat_count번 반복
+    4. 최종적으로 뽑힌 index들을 차례로 반환
+    
+    GRPO는 동일한 데이터를 여러 번 사용하면서 안정적으로 policy를 개선하는게 목표
+    : 같은 샘플을 여러번 학습 / batch 내에서도 복제된 데이터가 필요하기에 기존 Sampler 말고 RepeatRandomSampler()이용
+    """
     def __init__(
         self,
         data_source,
@@ -31,6 +48,7 @@ class RepeatRandomSampler(Sampler):
 
     def __iter__(self):
         indexes = torch.randperm(self.num_samples, generator=self.generator).tolist()
+        #batch_size만큼 index를 잘라서 chunk 단위로 묶음
         indexes = [indexes[i : i + self.batch_size] for i in range(0, len(indexes), self.batch_size)]
         indexes = [chunk for chunk in indexes if len(chunk) == self.batch_size]
         for chunk in indexes:
@@ -39,6 +57,7 @@ class RepeatRandomSampler(Sampler):
                     for _ in range(self.mini_repeat_count):
                         yield index
 
+    #샘플러의 총 길이 반환 - DataLoader가 몇 개의 샘플을 꺼낼지
     def __len__(self) -> int:
         return self.num_samples * self.mini_repeat_count * self.repeat_count
 
@@ -81,7 +100,7 @@ def combined_reward(prompt, completion, solution, **kwargs):
     accuracy_score = accuracy_reward(prompt, completion, solution)
 
 
-    return accuracy_score
+    return format_score * 0.3 + accuracy_score * 0.7
 
 
 class MinimalGRPOTrainer(Trainer):
@@ -96,7 +115,7 @@ class MinimalGRPOTrainer(Trainer):
 
         self.train_generation_config = GenerationConfig(
             max_new_tokens=args.max_completion_length,
-            do_sample=True,
+            do_sample=True, 
             temperature=1,
             pad_token_id=self.processing_class.tokenizer.pad_token_id
         )
@@ -109,7 +128,7 @@ class MinimalGRPOTrainer(Trainer):
 
         self.global_step = 1
         self.reward_func = reward_func
-        self.num_generations = args.num_generations
+        self.num_generations = args.num_generations #하나의 prompt로 몇 개의 샘플을 생성할지
         self.num_iterations = args.num_iterations
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
@@ -124,7 +143,9 @@ class MinimalGRPOTrainer(Trainer):
             **kwargs
         )
 
+    #train()시 자동 호출(hook처럼)
     def _get_train_sampler(self):
+        #모델이 한 번의 optimizer.step() 전에 처리하는 총 샘플 수
         effective_batch_size = (
             self.args.per_device_train_batch_size
             * self.args.gradient_accumulation_steps
@@ -144,11 +165,11 @@ class MinimalGRPOTrainer(Trainer):
         solutions = [example["ground_truth"] for example in batch]
         image_paths = [example["image_path"] for example in batch]
 
-        # Replicate each prompt num_generations times
+        # Replicate each prompt num_generations times: currently 2
         expanded_prompts = [prompt for prompt in prompts for _ in range(self.num_generations)]
         expanded_conversations = [conv for conv in conversations for _ in range(self.num_generations)]
         expanded_solutions = [sol for sol in solutions for _ in range(self.num_generations)]
-        expanded_image_paths = [img_path for img_path in image_paths for _ in range(self.num_generations)]
+        #expanded_image_paths = [img_path for img_path in image_paths for _ in range(self.num_generations)]
 
         inputs = self.processing_class.apply_chat_template(
             expanded_conversations,
@@ -239,33 +260,43 @@ class MinimalGRPOTrainer(Trainer):
         # Batch-wise evaluation
         for i in tqdm(range(0, len(eval_dataset), batch_size)):
             batch_data = eval_dataset[i:i + batch_size]
-            batch_messages = []
+            
+            batch_texts = []
+            batch_images = []
 
-            for sample in batch_data:
+            for sample in batch_data:                
                 message = [{
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": f"file://{sample['image_path']}"},
+                        {"type": "image"},
                         {"type": "text", "text": sample["prompt"]}
                     ]
                 }]
-                batch_messages.append(message)
+                
+                chat_text = self.processing_class.apply_chat_template(
+                    message, tokenize=False, add_generation_prompt=True
+                )
+                
+                batch_texts.append(chat_text)
+                batch_images.append(sample["image_path"])  # PIL 이미지 로딩 x, 경로로 넘김
 
-            text = [self.processing_class.apply_chat_template(msg, tokenize=False, add_generation_prompt=True) for msg in batch_messages]
-
+            
+            #여기서 오류 발생("Invalid input type. Must be a single image, a list of images, or a list of batches of images.")
             inputs = self.processing_class(
-                text=text,
-                images=[sample["image_path"] for sample in batch_data],
+                text=batch_texts,
+                images=batch_images,
                 padding=True,
                 return_tensors="pt"
-            )
-            inputs = inputs.to("cuda")
+            ).to("cuda")
             
             with torch.no_grad():
                 generated_ids = self.model.generate(**inputs, generation_config=self.eval_generation_config)
 
+            generated_ids_trimmed = [
+                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
             batch_output_text = self.processing_class.batch_decode(
-                generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
             )
 
             all_outputs.extend(batch_output_text)

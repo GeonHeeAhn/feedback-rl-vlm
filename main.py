@@ -33,15 +33,16 @@ QUESTION_TEMPLATE = (
 )
 
 if __name__ == "__main__":
-    config = GRPOConfig()
-    config.num_iterations = 1
-    config.num_generations = 2
+    config = GRPOConfig()   
+    config.num_iterations = 1 
+    # number of outputs G in grpo, reduce it would lead to faster training and smaller memory cost but higher variance
+    config.num_generations = 2 #8
     config.max_steps = 1000
-    config.per_device_train_batch_size = 2
-    config.gradient_accumulation_steps = 1
+    config.per_device_train_batch_size = 4 
+    config.gradient_accumulation_steps = 1 #2
     config.gradient_checkpointing=True
     config.report_to = "wandb"
-    config.run_name = "smolvlm2_counting"
+    config.run_name = "smolvlm2_counting_batch4"
     config.logging_steps= 1
 
     model_id = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
