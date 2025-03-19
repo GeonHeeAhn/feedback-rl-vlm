@@ -255,7 +255,8 @@ class MinimalGRPOTrainer(Trainer):
         self.model.eval()
         total_samples = len(self.eval_dataset)
         all_outputs = []
-
+        accuracy = 0
+        
         print("\n🔍 Running Evaluation...")
 
 
@@ -306,12 +307,14 @@ class MinimalGRPOTrainer(Trainer):
                 print(f"✅ Ground Truth: {ground_truth}")
                 print(f"🎯 Correct? {'Yes ✅' if is_correct else 'No ❌'}")
                 print(f"📊 Running Accuracy: {correct_count / (len(all_outputs)) * 100:.2f}%")
-
+                accuracy = correct_count / (len(all_outputs)) * 100
+        """
         accuracy = sum(
             1 for sample, output in zip(self.eval_dataset, all_outputs)
             #if self.extract_number_answer(output) == sample['ground_truth']
             if output.strip() == sample['ground_truth']
         ) / total_samples * 100
+        """
 
         print(f"\n🏆 Evaluation Completed! Accuracy: {accuracy:.2f}%")
 
