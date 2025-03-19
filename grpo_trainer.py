@@ -306,7 +306,7 @@ class MinimalGRPOTrainer(Trainer):
                 print(f"🤖 Model Output: {output.strip()}")
                 print(f"✅ Ground Truth: {ground_truth}")
                 print(f"🎯 Correct? {'Yes ✅' if is_correct else 'No ❌'}")
-                print(f"📊 Running Accuracy: {correct_count / total_samples * 100:.2f}%")
+                print(f"📊 Running Accuracy: {correct_count / (len(all_outputs)) * 100:.2f}%")
                 accuracy = correct_count / total_samples * 100
         """
         accuracy = sum(
