@@ -256,6 +256,7 @@ class MinimalGRPOTrainer(Trainer):
         total_samples = len(self.eval_dataset)
         all_outputs = []
         accuracy = 0
+        correct_count = 0
         
         print("\n🔍 Running Evaluation...")
 
@@ -281,7 +282,6 @@ class MinimalGRPOTrainer(Trainer):
                 generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
             )
             all_outputs.extend(batch_output_text)
-            correct_count = 0
             
             for sample, output in zip(batch_data, batch_output_text):
                 #predicted = self.extract_number_answer(output)
@@ -306,8 +306,8 @@ class MinimalGRPOTrainer(Trainer):
                 print(f"🤖 Model Output: {output.strip()}")
                 print(f"✅ Ground Truth: {ground_truth}")
                 print(f"🎯 Correct? {'Yes ✅' if is_correct else 'No ❌'}")
-                print(f"📊 Running Accuracy: {correct_count / (len(all_outputs)) * 100:.2f}%")
-                accuracy = correct_count / (len(all_outputs)) * 100
+                print(f"📊 Running Accuracy: {correct_count / total_samples * 100:.2f}%")
+                accuracy = correct_count / total_samples * 100
         """
         accuracy = sum(
             1 for sample, output in zip(self.eval_dataset, all_outputs)
