@@ -77,7 +77,16 @@ if __name__ == "__main__":
             new_entry = {
                 "prompt": QUESTION_TEMPLATE.format(Question=entry["question"]),
                 "image_path": entry["image_path"],
-                "ground_truth": entry["ground_truth"]
+                "ground_truth": entry["ground_truth"],
+                "conversations": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "url": entry["image_path"]},
+                            {"type": "text", "text": QUESTION_TEMPLATE.format(Question=entry["question"])},
+                        ]
+                    }
+                ]
             }
             eval_dataset.append(new_entry)
 
@@ -90,4 +99,4 @@ if __name__ == "__main__":
     )
 
     trainer.train()  
-    trainer.evaluate(eval_dataset)  
+    trainer.evaluate()  

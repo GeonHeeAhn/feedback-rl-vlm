@@ -65,21 +65,22 @@ def accuracy_reward(prompt, completion, solution, **kwargs):
     
     reward = 0.0
     try:
-        if isinstance(solution, list):
+        if isinstance(solution, list): #e.g) [5]
             solution = solution[0]
-
+        #re.search() : finds the first matching substring and returns a Match object.
         sol_match = re.search(r'<answer>\s*(\d+)\s*</answer>', str(solution))
         ground_truth = sol_match.group(1).strip() if sol_match else str(solution).strip()
 
         content_match = re.search(r'<answer>\s*(\d+)\s*</answer>', completion)
         if content_match:
             student_answer = content_match.group(1).strip()
-        else:
+        else: #without tag
             student_answer = completion.strip()
 
         try:
             if float(student_answer) == float(ground_truth):
                 reward = 1.0
+        
         except ValueError:
             if student_answer.lower() == ground_truth.lower():
                 reward = 1.0
@@ -244,66 +245,73 @@ class MinimalGRPOTrainer(Trainer):
         loss = - (mean_log_probs * advantages).mean()
         return loss
     
-    def evaluate(self, eval_dataset, batch_size=64, output_path="./logs/superclevr_eval_results.json"):
-    
-        if eval_dataset is None:
+
+    def evaluate(self, batch_size=16, output_path="./logs/superclevr_eval_results.json"):
+
+        if self.eval_dataset is None:
             print("⚠️ No evaluation dataset provided. Skipping evaluation.")
             return
 
         self.model.eval()
-        total_correct = 0
-        total_samples = len(eval_dataset)
+        total_samples = len(self.eval_dataset)
         all_outputs = []
 
         print("\n🔍 Running Evaluation...")
 
-        # Batch-wise evaluation
-        for i in tqdm(range(0, len(eval_dataset), batch_size)):
-            batch_data = eval_dataset[i:i + batch_size]
-            
-            batch_texts = []
-            batch_images = []
 
-            for sample in batch_data:                
-                message = [{
-                    "role": "user",
-                    "content": [
-                        {"type": "image"},
-                        {"type": "text", "text": sample["prompt"]}
-                    ]
-                }]
-                
-                chat_text = self.processing_class.apply_chat_template(
-                    message, tokenize=False, add_generation_prompt=True
-                )
-                
-                batch_texts.append(chat_text)
-                batch_images.append(sample["image_path"])  # PIL 이미지 로딩 x, 경로로 넘김
+        for i in tqdm(range(0, len(self.eval_dataset), batch_size)):
+            batch_data = self.eval_dataset[i:i + batch_size]
+            batch_conversations = [sample["conversations"] for sample in batch_data]
+            inputs = self.processing_class.apply_chat_template(
+                batch_conversations,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                padding="longest"
+            ).to(self.model.device,dtype=torch.bfloat16)
 
-            
-            #여기서 오류 발생("Invalid input type. Must be a single image, a list of images, or a list of batches of images.")
-            inputs = self.processing_class(
-                text=batch_texts,
-                images=batch_images,
-                padding=True,
-                return_tensors="pt"
-            ).to("cuda")
-            
             with torch.no_grad():
                 generated_ids = self.model.generate(**inputs, generation_config=self.eval_generation_config)
+            prompt_len = inputs["input_ids"].shape[1]
+            generated_ids_trimmed = generated_ids[:, prompt_len:]
 
-            generated_ids_trimmed = [
-                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
             batch_output_text = self.processing_class.batch_decode(
                 generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
             )
-
             all_outputs.extend(batch_output_text)
+            correct_count = 0
+            
+            for sample, output in zip(batch_data, batch_output_text):
+                #predicted = self.extract_number_answer(output)
+                #if <answer> tag included
+                match = re.search(r'<answer>\s*(\d+)\s*</answer>', output)
+                
+                if match:
+                    predicted = int(match.group(1))
+                else:
+                    #if no tag
+                    num_match = re.search(r'\d+', output)
+                    predicted = int(num_match.group(0)) if num_match else None
 
-        # Compare outputs with ground truth
-        accuracy = sum(1 for sample, output in zip(eval_dataset, all_outputs)
-                       if self.extract_number_answer(output) == sample['ground_truth']) / total_samples * 100
+                ground_truth = int(sample['ground_truth'])
+                is_correct = predicted == ground_truth
+
+                if is_correct:
+                    correct_count += 1
+
+                print("=" * 40)
+                print(f"🔹 Question: {sample['prompt']}")
+                print(f"🤖 Model Output: {output.strip()}")
+                print(f"✅ Ground Truth: {ground_truth}")
+                print(f"🎯 Correct? {'Yes ✅' if is_correct else 'No ❌'}")
+                print(f"📊 Running Accuracy: {correct_count / (len(all_outputs)) * 100:.2f}%")
+
+        accuracy = sum(
+            1 for sample, output in zip(self.eval_dataset, all_outputs)
+            #if self.extract_number_answer(output) == sample['ground_truth']
+            if output.strip() == sample['ground_truth']
+        ) / total_samples * 100
 
         print(f"\n🏆 Evaluation Completed! Accuracy: {accuracy:.2f}%")
 
