@@ -160,28 +160,23 @@ class MinimalGRPOTrainer(Trainer):
         )
         
     def _generate_and_score(self, batch, is_eval=False):
-    
         prompts = [example["prompt"] for example in batch]
         conversations = [example["conversations"] for example in batch]
         solutions = [example["ground_truth"] for example in batch]
-        image_paths = [example["image_path"] for example in batch]
 
         # Replicate each prompt num_generations times: currently 2
         expanded_prompts = [prompt for prompt in prompts for _ in range(self.num_generations)]
         expanded_conversations = [conv for conv in conversations for _ in range(self.num_generations)]
         expanded_solutions = [sol for sol in solutions for _ in range(self.num_generations)]
         #expanded_image_paths = [img_path for img_path in image_paths for _ in range(self.num_generations)]
-
+        
         inputs = self.processing_class.apply_chat_template(
             expanded_conversations,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            text_kwargs={
-                "padding": "longest",
-                "truncation": True
-            }
+            text_kwargs={"padding": "longest", "truncation": True}
         ).to(self.model.device, dtype=torch.bfloat16)
 
 
@@ -199,6 +194,14 @@ class MinimalGRPOTrainer(Trainer):
             device=self.model.device
         )
         
+        eos_token_id = self.processing_class.tokenizer.eos_token_id
+        is_eos = completion_ids == eos_token_id
+        eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=self.model.device)
+        eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
+        seq_idx = torch.arange(is_eos.size(1), device=self.model.device).unsqueeze(0)
+        completion_mask = (seq_idx <= eos_idx.unsqueeze(1)).int()
+
+        
         self.global_step += 1
         if self.global_step % 5 == 0 and not is_eval:
             print("="*20)
@@ -207,16 +210,17 @@ class MinimalGRPOTrainer(Trainer):
             print(expanded_prompts[0])
             print(completions[0])
 
-        return inputs["input_ids"], inputs["attention_mask"], completion_ids, rewards
+        return inputs["input_ids"], inputs["attention_mask"], completion_ids, completion_mask, rewards
     
     def compute_loss(self, model, batch, return_outputs=False, num_items_in_batch=None):
-        prompt_ids, prompt_mask, completion_ids, rewards = self._generate_and_score(batch)
+        prompt_ids, prompt_mask, completion_ids, completion_mask, rewards = self._generate_and_score(batch)
 
         # Reshape tensors to group completions by their original prompt
         batch_size = len(batch)
         prompt_ids = prompt_ids.view(batch_size, self.num_generations, -1)
         prompt_mask = prompt_mask.view(batch_size, self.num_generations, -1)
         completion_ids = completion_ids.view(batch_size, self.num_generations, -1)
+        completion_mask = completion_mask.view(batch_size, self.num_generations, -1)
         rewards = rewards.view(batch_size, self.num_generations)
 
         # Log reward statistics
@@ -229,20 +233,24 @@ class MinimalGRPOTrainer(Trainer):
         flat_prompt_ids = prompt_ids.view(-1, prompt_ids.size(-1))
         flat_prompt_mask = prompt_mask.view(-1, prompt_mask.size(-1))
         flat_completion_ids = completion_ids.view(-1, completion_ids.size(-1))
+        flat_completion_mask = completion_mask.view(-1, completion_mask.size(-1))
 
         input_ids = torch.cat([flat_prompt_ids, flat_completion_ids], dim=1)
-        attention_mask = torch.cat([flat_prompt_mask, torch.ones_like(flat_completion_ids)], dim=1)
+        attention_mask = torch.cat([flat_prompt_mask, flat_completion_mask], dim=1)
 
         outputs = model(input_ids, attention_mask=attention_mask)
         completion_logits = outputs.logits[:, flat_prompt_ids.shape[1]:, :]
         log_probs = torch.log_softmax(completion_logits, dim=-1)
         target_log_probs = log_probs.gather(dim=-1, index=flat_completion_ids.unsqueeze(-1)).squeeze(-1)
+        
+        #reward를 prompt 그룹 단위로 묶어서 평균/표준편차 계산
+        mean_rewards = rewards.mean(dim=1, keepdim=True) #dim=1 : num_generations diemension 기준으로 그룹화
+        std_rewards = rewards.std(dim=1, keepdim=True) + 1e-4
+        advantages = (rewards - mean_rewards) / std_rewards
+        advantages = advantages.view(-1, 1)
 
-        target_log_probs = target_log_probs.view(batch_size, self.num_generations, -1)
-        mean_log_probs = target_log_probs.mean(dim=-1)
-
-        advantages = rewards
-        loss = - (mean_log_probs * advantages).mean()
+        target_log_probs = target_log_probs.sum(dim=1, keepdim=True)
+        loss = - (target_log_probs * advantages).mean()
         return loss
     
 
